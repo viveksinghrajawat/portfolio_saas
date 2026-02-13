@@ -2,30 +2,48 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import prisma from "@/lib/prisma";
 import { deploySchema } from "@/lib/validations";
+import DOMPurify from "isomorphic-dompurify";
+import { JSDOM } from "jsdom";
 
 export async function POST(req) {
     const session = await auth();
 
     if (!session?.user || !session?.accessToken) {
-        return NextResponse.json({ error: "Unauthorized or missing GitHub permissions" }, { status: 401 });
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     try {
         const body = await req.json();
 
         // 1. Validation
-        const validation = deploySchema.safeParse(body);
-        if (!validation.success) {
-            return NextResponse.json({ error: validation.error.errors[0].message }, { status: 400 });
+        // We manually validate new fields for now or update schema
+        const { repoName, html, description, isPublic, isTemplate, templateFields } = body;
+
+        if (!repoName || !html) {
+            return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
         }
 
-        const { repoName, html, description } = validation.data;
+        // 2. Security: HTML Sanitization
+        // Allow-list approach. Strip <script>, event handlers, forms, etc.
+        const cleanHtml = DOMPurify.sanitize(html, {
+            USE_PROFILES: { html: true },
+            FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input'],
+            FORBID_ATTR: ['onclick', 'onmouseover', 'onload', 'onerror', 'style'], // style is debatable, maybe allow simple styles
+        });
 
-        // 2. Rate Limiting (Simple Header Check)
-        // In production, use Vercel KV or similar.
-        // This is a placeholder as persistent storage was flaky. 
+        // 3. Template Fields Validation
+        if (isTemplate && templateFields) {
+            if (!Array.isArray(templateFields)) {
+                return NextResponse.json({ error: "Invalid template fields format" }, { status: 400 });
+            }
+            // Validate structure
+            const isValid = templateFields.every(f => f.key && f.label && f.type);
+            if (!isValid) {
+                return NextResponse.json({ error: "Invalid template fields structure" }, { status: 400 });
+            }
+        }
 
-        // 3. Create Repository on GitHub
+        // 4. Create Repository on GitHub
         const createRepoRes = await fetch("https://api.github.com/user/repos", {
             method: "POST",
             headers: {
@@ -35,8 +53,8 @@ export async function POST(req) {
             body: JSON.stringify({
                 name: repoName,
                 description: description || "Created via MySaaS Portfolio",
-                auto_init: true, // Initialize with README
-                private: false,  // Pages usually needs public for free accounts
+                auto_init: true,
+                private: !isPublic,
             }),
         });
 
@@ -47,10 +65,8 @@ export async function POST(req) {
 
         const repoData = await createRepoRes.json();
 
-        // 2. Upload index.html
-        // We need to commit the file. 
-        // Simplified: PUT /repos/{owner}/{repo}/contents/{path}
-        const contentEncoded = Buffer.from(html).toString("base64");
+        // 5. Upload index.html
+        const contentEncoded = Buffer.from(cleanHtml).toString("base64");
 
         const uploadRes = await fetch(`https://api.github.com/repos/${repoData.full_name}/contents/index.html`, {
             method: "PUT",
@@ -66,23 +82,24 @@ export async function POST(req) {
 
         if (!uploadRes.ok) throw new Error("Failed to upload file to GitHub");
 
-        // 3. Enable GitHub Pages (Optional - might require different permissions/setup)
-        // For now, we'll return the Repo URL and the likely Pages URL
         const pagesUrl = `https://${repoData.owner.login}.github.io/${repoData.name}/`;
 
-        // 4. Save to Database
-        /* 
-        // DB interactions commented out until DB is stable
+        // 6. Save to Database
         await prisma.project.create({
-          data: {
-            name: repoName,
-            description,
-            userId: session.user.id,
-            repoUrl: repoData.html_url,
-            liveUrl: pagesUrl
-          }
+            data: {
+                name: repoName,
+                description,
+                userId: session.user.id,
+                repoUrl: repoData.html_url,
+                liveUrl: pagesUrl,
+                isPublic: !!isPublic,
+                isTemplate: !!isTemplate,
+                htmlContent: cleanHtml,
+                templateFields: templateFields || [],
+                downloads: 0,
+                views: 0
+            }
         });
-        */
 
         return NextResponse.json({
             success: true,
