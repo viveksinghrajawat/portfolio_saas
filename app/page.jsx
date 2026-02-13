@@ -35,7 +35,7 @@ export default function Home() {
                         👋
                     </div>
                     <h1 className="text-5xl font-extrabold tracking-tight lg:text-6xl mb-4">
-                        Hi, I'm <span className="text-primary">Dev Name</span>
+                        Hi, I&apos;m <span className="text-primary">Dev Name</span>
                     </h1>
                     <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
                         Full Stack Developer specializing in building exceptional digital experiences.
